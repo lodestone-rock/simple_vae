@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as ckpt
 
 
 def zero_init(layer):
@@ -115,13 +116,18 @@ class Encoder(nn.Module):
             padding="same",
         )
 
-    def forward(self, x):
+    def forward(self, x, checkpoint=True):
         x = self.in_conv(x)
         for i, res_blocks in enumerate(self.res_blocks):
             if i != 0:  # no downscale first input
                 x = self.down_blocks[i - 1](x)
+
             for resnet in res_blocks:
-                x = resnet(x)
+                if checkpoint:
+                    x = ckpt.checkpoint(resnet, x)
+                else:
+                    x = resnet(x)
+
         x = self.out_norm(x)
         x = self.out_conv(x)
         return F.tanh(x)  # clamp
@@ -129,7 +135,7 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
     def __init__(
-        self, in_channels, out_channels, up_layer_blocks=((32, 2), (64, 2), (128, 2))
+        self, in_channels, out_channels, up_layer_blocks=((128, 2), (64, 2), (32, 2))
     ):
         super(Decoder, self).__init__()
         self.in_conv = nn.Conv2d(
@@ -163,27 +169,75 @@ class Decoder(nn.Module):
             padding="same",
         )
 
-    def forward(self, x):
+    def forward(self, x, checkpoint=True):
+        # checkpointing is defaulted to true
         x = self.in_conv(x)
         for i, res_blocks in enumerate(self.res_blocks):
             if i != 0:  # no downscale first input
                 x = self.up_blocks[i - 1](x)
+
             for resnet in res_blocks:
-                x = resnet(x)
+                if checkpoint:
+                    x = ckpt.checkpoint(resnet, x)
+                else:
+                    x = resnet(x)
+
         x = self.out_norm(x)
         x = self.out_conv(x)
         return x
 
 
+class AutoEncoder(nn.Module):
+    def __init__(
+        self, pixel_channels=3, bottleneck_channels=4, up_layer_blocks=((32, 2), (64, 2), (128, 2)), down_layer_blocks=((32, 2), (64, 2), (128, 2))
+    ):
+        super(AutoEncoder, self).__init__()
+
+        self.encoder = Encoder(pixel_channels, bottleneck_channels, down_layer_blocks)
+        self.decoder = Decoder(bottleneck_channels, pixel_channels, up_layer_blocks)
+    
+    def encode(self, x, checkpoint=True):
+        return self.encoder(x, checkpoint)
+    
+    def decode(self, x, checkpoint=True):
+        return self.decoder(x, checkpoint)
+    
+    def forward(self, x):
+        x = self.encode(x)
+        return self.decode(x)
+    
+    def loss_and_grad(self, x, l1=1, l2=1, checkpoint=True, grad_accum_steps=1, return_latent=True):
+        target = x
+        latent = None
+        x = self.encode(x, checkpoint)
+        if return_latent:
+            latent=x
+        x = self.decode(x, checkpoint)
+        # accumulate grad and free the graph
+        l1 = torch.mean(torch.abs(x-target)) * l1
+        # l1.backward() 
+        l2 = torch.mean(torch.square(x-target)) * l2
+        # l2.backward()
+        loss = (l1 + l2) / grad_accum_steps
+        loss.backward()
+        return loss, l1, l2, latent
+
+
 # Example usage:
 if __name__ == "__main__":
-    with torch.no_grad():
-        # Dummy input with batch size 1, 3 channels, and 32x32 image
-        x = torch.randn(24, 3, 256, 256).to("cuda:1")
-        encoder = Encoder(3, 16)
-        encoder.to("cuda:1")
-        decoder = Decoder(16, 3)
-        decoder.to("cuda:1")
-        latent = encoder(x)
-        output = decoder(latent)
-        print(output.shape)  # Should print torch.Size([1, 16, 32, 32])
+    # unit test in here lol :v
+    # with torch.no_grad():
+    # Dummy input with batch size 1, 3 channels, and 32x32 image
+    x = torch.randn(16, 3, 256, 256).to("cuda:1")
+    # encoder = Encoder(3, 16)
+    # encoder.to("cuda:1")
+    # decoder = Decoder(16, 3)
+    # decoder.to("cuda:1")
+    # latent = encoder(x)
+    # output = decoder(latent)
+    # print(output.shape)  # Should print torch.Size([1, 16, 32, 32])
+
+    ae = AutoEncoder(3, 4, down_layer_blocks=((32, 15), (64, 20), (96, 20), (128, 20)), up_layer_blocks=((128, 20), (96, 20), (64, 20), (32, 15)))
+    ae.to("cuda:1")
+    recon = ae.loss_and_grad(x, checkpoint=True)
+    print()
