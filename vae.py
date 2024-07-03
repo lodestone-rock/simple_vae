@@ -184,43 +184,58 @@ class Decoder(nn.Module):
 
         x = self.out_norm(x)
         x = self.out_conv(x)
-        return x
+        return F.tanh(x)  # clamp
 
 
 class AutoEncoder(nn.Module):
     def __init__(
-        self, pixel_channels=3, bottleneck_channels=4, up_layer_blocks=((32, 2), (64, 2), (128, 2)), down_layer_blocks=((32, 2), (64, 2), (128, 2))
+        self,
+        pixel_channels=3,
+        bottleneck_channels=4,
+        up_layer_blocks=((32, 2), (64, 2), (128, 2)),
+        down_layer_blocks=((32, 2), (64, 2), (128, 2)),
+        **kwargs
     ):
         super(AutoEncoder, self).__init__()
 
         self.encoder = Encoder(pixel_channels, bottleneck_channels, down_layer_blocks)
         self.decoder = Decoder(bottleneck_channels, pixel_channels, up_layer_blocks)
-    
+
     def encode(self, x, checkpoint=True):
         return self.encoder(x, checkpoint)
-    
+
     def decode(self, x, checkpoint=True):
         return self.decoder(x, checkpoint)
-    
+
     def forward(self, x):
         x = self.encode(x)
         return self.decode(x)
-    
-    def loss_and_grad(self, x, l1=1, l2=1, checkpoint=True, grad_accum_steps=1, return_latent=True):
+
+    def loss_and_grad(
+        self,
+        x,
+        l1=1,
+        l2=1,
+        checkpoint=True,
+        grad_accum_steps=1,
+        return_latent=True,
+        compute_grad=True,
+    ):
         target = x
         latent = None
         x = self.encode(x, checkpoint)
         if return_latent:
-            latent=x
+            latent = x
         x = self.decode(x, checkpoint)
         # accumulate grad and free the graph
-        l1 = torch.mean(torch.abs(x-target)) * l1
-        # l1.backward() 
-        l2 = torch.mean(torch.square(x-target)) * l2
+        l1 = torch.mean(torch.abs(x - target)) * l1
+        # l1.backward()
+        l2 = torch.mean(torch.square(x - target)) * l2
         # l2.backward()
         loss = (l1 + l2) / grad_accum_steps
-        loss.backward()
-        return loss, l1, l2, latent
+        if compute_grad:
+            loss.backward()
+        return loss, l1, l2, latent, x
 
 
 # Example usage:
@@ -228,7 +243,7 @@ if __name__ == "__main__":
     # unit test in here lol :v
     # with torch.no_grad():
     # Dummy input with batch size 1, 3 channels, and 32x32 image
-    x = torch.randn(16, 3, 256, 256).to("cuda:1")
+    x = torch.randn(16, 3, 256, 256).to("cuda:0")
     # encoder = Encoder(3, 16)
     # encoder.to("cuda:1")
     # decoder = Decoder(16, 3)
@@ -237,7 +252,12 @@ if __name__ == "__main__":
     # output = decoder(latent)
     # print(output.shape)  # Should print torch.Size([1, 16, 32, 32])
 
-    ae = AutoEncoder(3, 4, down_layer_blocks=((32, 15), (64, 20), (96, 20), (128, 20)), up_layer_blocks=((128, 20), (96, 20), (64, 20), (32, 15)))
-    ae.to("cuda:1")
+    ae = AutoEncoder(
+        3,
+        4,
+        down_layer_blocks=((32, 15), (64, 20), (96, 20), (128, 20)),
+        up_layer_blocks=((128, 20), (96, 20), (64, 20), (32, 15)),
+    )
+    ae.to("cuda:0")
     recon = ae.loss_and_grad(x, checkpoint=True)
     print()
