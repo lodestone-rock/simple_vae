@@ -4,14 +4,6 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as ckpt
 
 
-def zero_init(layer):
-    # set initial params to zero
-    nn.init.zeros_(layer.weight)
-    if layer.bias is not None:
-        nn.init.zeros_(layer.bias)
-    return layer
-
-
 class RMSNorm(nn.Module):
     def __init__(self, d, eps=1e-8):
         super(RMSNorm, self).__init__()
