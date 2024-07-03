@@ -1,0 +1,6 @@
+{
+    "pixel_channels": 3,
+    "bottleneck_channels": 4,
+    "up_layer_blocks": [[32, 2], [64, 2], [128, 2]],
+    "down_layer_blocks": [[32, 2], [64, 2], [128, 2]]
+}
