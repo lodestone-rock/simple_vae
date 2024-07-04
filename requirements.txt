@@ -7,3 +7,5 @@ schedulefree
 wandb
 safetensors
 tqdm
+optree
+einops
