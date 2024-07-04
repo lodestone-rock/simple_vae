@@ -1,12 +1,14 @@
 import os
-import datetime
+from datetime import datetime
 import logging
+import argparse
 
 import torch
 import wandb
 from tqdm import tqdm
 from torch.utils.data import DataLoader, random_split
 from torchvision.utils import save_image
+import torch.nn.functional as F
 
 from schedulefree import AdamWScheduleFree
 
@@ -45,28 +47,32 @@ def prime_optimizer(model, lr, warmup_steps):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Load configuration from a JSON file.')
+    parser.add_argument('model_config', type=str, help='Path to modeling config file')
+    parser.add_argument('training_config', type=str, help='Path to training config file')
+    args = parser.parse_args()
 
-    training_config = load_config("autoencoder.json")
+    training_config = load_config(args.training_config)
     # uncomment this for debugging bypass
-    training_config = {
-        "image_path": "path",
-        "training_preview_path": "path",
-        "master_seed": 0,
-        "step_counter_start": 0,
-        "epoch": 10,
-        "lr": 1e-4,
-        "warmup": 100,
-        "batch_size": 32,
-        "grad_accum_count": 10,
-        "val_percentage": 0.1,
-        "check_point_every": 1000,
-        "num_of_dataloader_workers": 2,
-        "checkpoint_path": "path",
-        "wandb_project_name": None,
-        "run_name": "vae_training",
-        "logging_file": "training.log",
-        "device": "cuda:0",
-    }
+    # training_config = {
+    #     "image_path": "train_images",
+    #     "training_preview_path": "preview",
+    #     "master_seed": 0,
+    #     "step_counter_start": 0,
+    #     "epoch": 10,
+    #     "lr": 1e-3,
+    #     "warmup": 10,
+    #     "batch_size": 32,
+    #     "grad_accum_count": 1,
+    #     "val_percentage": 0.1,
+    #     "check_point_every": 1000,
+    #     "num_of_dataloader_workers": 2,
+    #     "checkpoint_path": "path",
+    #     "wandb_project_name": None,
+    #     "run_name": "vae_training",
+    #     "logging_file": "training.log",
+    #     "device": "cuda:0",
+    # }
 
     # init master seed for repro
     torch.manual_seed(training_config["master_seed"])
@@ -95,7 +101,7 @@ if __name__ == "__main__":
     )
 
     # init model
-    ae_conf = load_config("autoencoder.json")
+    ae_conf = load_config(args.model_config)
     model = AutoEncoder(**ae_conf)
     model.to(training_config["device"])
     optimizer = prime_optimizer(model, training_config["lr"], training_config["warmup"])
@@ -139,6 +145,7 @@ if __name__ == "__main__":
         pin_memory=True,
         collate_fn=custom_collate,
     )
+    val_iterator = iter(val_dataloader)
 
     for epoch in range(training_config["epoch"]):
         # init dataloader
@@ -152,7 +159,7 @@ if __name__ == "__main__":
         )
         # pretty loading bar
         progress_bar = tqdm(
-            total=len(dataloader) // training_config["batch_size"], smoothing=0.5
+            total=len(dataloader) // training_config["batch_size"], smoothing=0.5, dynamic_ncols=True
         )
 
         for step, batch in enumerate(dataloader):
@@ -202,20 +209,20 @@ if __name__ == "__main__":
                     model.state_dict(),
                     os.path.join(checkpoint_folder, "model.safetensors"),
                 )
-                store_safetensors(
-                    optimizer.state_dict(),
-                    os.path.join(checkpoint_folder, "optim_state.safetensors"),
-                )
+                # to lazy to flatten and save it as safetensors
+                # only useful for training anyway
+                torch.save(optimizer.state_dict(), os.path.join(checkpoint_folder, "optim_state.pth"))
                 logging.info(f"Saved checkpoint at {checkpoint_folder}")
 
             # log wandb
-            if counter % 10:
+            if counter % training_config["grad_accum_count"] * 10 == 0:
                 if training_config["wandb_project_name"] is not None:
                     wandb.log(
                         {
                             "loss": loss_counter,
                             "loss_l1": loss_l1_counter,
                             "loss_l2": loss_l2_counter,
+                            "lr": training_config["lr"]
                         },
                         step=counter,
                     )
@@ -223,7 +230,7 @@ if __name__ == "__main__":
                     f"Processing epoch {epoch}/{training_config['epoch']} || loss:{loss_counter}"
                 )
 
-            if counter % (100 * training_config["grad_accum_count"]):
+            if counter % (training_config["batch_size"] * training_config["grad_accum_count"])==0:
                 with torch.no_grad():
                     try:
                         while True:
@@ -255,12 +262,13 @@ if __name__ == "__main__":
                             grad_accum_steps=training_config["grad_accum_count"],
                             compute_grad=False,
                         )
-                        wandb.log({"val_loss": val_loss}, step=counter)
+                        if training_config["wandb_project_name"] is not None:
+                            wandb.log({"val_loss": val_loss}, step=counter)
 
                         # preview
-                        preview_out = model(x)
+                        preview_out = model(val_batch_cuda)
                         save_image(
-                            torch.cat(preview_out[:4], x[:4]),
+                            torch.cat([preview_out[:4], val_batch_cuda[:4]]),
                             f"{training_config['training_preview_path']}/{step:08}.png",
                             nrow=4,
                             normalize=True,
