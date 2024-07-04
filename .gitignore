@@ -1,4 +1,10 @@
 __pycache__
 init.sh
 /.vscode
-
+*.png
+*.pth
+*.safetensors
+wandb
+sine*
+silu*
+*.log
