@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as ckpt
-
+from einops import rearrange
 
 class RMSNorm(nn.Module):
     def __init__(self, d, eps=1e-8):
@@ -18,23 +18,26 @@ class RMSNorm(nn.Module):
 
 class SimpleResNetBlock(nn.Module):
     def __init__(
-        self, in_channels, out_channels, kernel_size=3, stride=1, padding="same"
+        self, in_channels, out_channels, kernel_size=3, stride=1, padding="same", act_fn=torch.sin
     ):
         super(SimpleResNetBlock, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)
         self.rms_norm = RMSNorm(out_channels)
-        self.pointwise = nn.Conv2d(in_channels, out_channels, 1, stride, padding)
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, groups=2)
+        self.pointwise = nn.Conv2d(in_channels // 2, out_channels, 1, stride, padding)
+        self.act_fn = act_fn
         torch.nn.init.zeros_(self.pointwise.weight)
         torch.nn.init.zeros_(self.pointwise.bias)
 
     def forward(self, x):
         skip = x
-        x = self.conv(x)
         x = self.rms_norm(x)
-        x = torch.sin(x)
+        x = self.conv(x)
+        lin, gate = rearrange(x, "n (g c) h w -> g n c h w", g=2)
+        x = lin * self.act_fn(gate)
+        #x = self.act_fn(x)
         x = self.pointwise(x)
         return x + skip
-
+   
 
 class DownBlock(nn.Module):
     def __init__(self, in_channels, out_channels, scale_factor=2):
@@ -68,7 +71,7 @@ class UpBlock(nn.Module):
 
 class Encoder(nn.Module):
     def __init__(
-        self, in_channels, out_channels, down_layer_blocks=((32, 2), (64, 2), (128, 2))
+        self, in_channels, out_channels, down_layer_blocks=((32, 2), (64, 2), (128, 2)), act_fn=torch.sin
     ):
         super(Encoder, self).__init__()
         self.in_conv = nn.Conv2d(
@@ -92,7 +95,7 @@ class Encoder(nn.Module):
                 down_blocks.append(downsample)
             for block in range(blocks[1]):
                 # (2) block count
-                resnet = SimpleResNetBlock(blocks[0], blocks[0], 3, 1, "same")
+                resnet = SimpleResNetBlock(blocks[0], blocks[0], 3, 1, "same", act_fn)
                 res_block.append(resnet)
             res_blocks.append(res_block)
 
@@ -127,7 +130,7 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
     def __init__(
-        self, in_channels, out_channels, up_layer_blocks=((128, 2), (64, 2), (32, 2))
+        self, in_channels, out_channels, up_layer_blocks=((128, 2), (64, 2), (32, 2)), act_fn=torch.sin
     ):
         super(Decoder, self).__init__()
         self.in_conv = nn.Conv2d(
@@ -145,7 +148,7 @@ class Decoder(nn.Module):
                 up_blocks.append(upsample)
             for block in range(blocks[1]):
                 # (2) block count
-                resnet = SimpleResNetBlock(blocks[0], blocks[0], 3, 1, "same")
+                resnet = SimpleResNetBlock(blocks[0], blocks[0], 3, 1, "same", act_fn)
                 res_block.append(resnet)
             res_blocks.append(res_block)
 
@@ -186,12 +189,25 @@ class AutoEncoder(nn.Module):
         bottleneck_channels=4,
         up_layer_blocks=((32, 2), (64, 2), (128, 2)),
         down_layer_blocks=((32, 2), (64, 2), (128, 2)),
+        act_fn="sin",
         **kwargs
     ):
         super(AutoEncoder, self).__init__()
 
-        self.encoder = Encoder(pixel_channels, bottleneck_channels, down_layer_blocks)
-        self.decoder = Decoder(bottleneck_channels, pixel_channels, up_layer_blocks)
+        activation_functions = {
+            'relu': F.relu,
+            'leaky_relu': F.leaky_relu,
+            'sigmoid': F.sigmoid,
+            'tanh': F.tanh,
+            'elu': F.elu,
+            'selu': F.selu,
+            'gelu': F.gelu,
+            'silu': F.silu,
+            'sin': torch.sin,
+        }
+
+        self.encoder = Encoder(pixel_channels, bottleneck_channels, down_layer_blocks, activation_functions[act_fn])
+        self.decoder = Decoder(bottleneck_channels, pixel_channels, up_layer_blocks, activation_functions[act_fn])
 
     def encode(self, x, checkpoint=True):
         return self.encoder(x, checkpoint)
