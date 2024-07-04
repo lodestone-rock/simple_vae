@@ -1,6 +1,7 @@
 {
     "pixel_channels": 3,
     "bottleneck_channels": 4,
-    "up_layer_blocks": [[32, 2], [64, 2], [128, 2]],
-    "down_layer_blocks": [[32, 2], [64, 2], [128, 2]]
+    "up_layer_blocks": [[32, 10], [64, 15], [96, 20], [128, 20]],
+    "down_layer_blocks": [[128, 20], [96, 20], [64, 15], [32, 10]],
+    "act_fn": "sin"
 }

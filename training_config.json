@@ -1,0 +1,19 @@
+{
+    "image_path": "train_images",
+    "training_preview_path": "preview",
+    "master_seed": 0,
+    "step_counter_start": 0,
+    "epoch": 10,
+    "lr": 1e-3,
+    "warmup": 10,
+    "batch_size": 32,
+    "grad_accum_count": 1,
+    "val_percentage": 0.1,
+    "check_point_every": 1000,
+    "num_of_dataloader_workers": 2,
+    "checkpoint_path": "path",
+    "wandb_project_name": "autoencoder",
+    "run_name": "vae",
+    "logging_file": "training.log",
+    "device": "cuda:0"
+}
