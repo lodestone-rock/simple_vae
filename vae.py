@@ -3,6 +3,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as ckpt
 from einops import rearrange
+import torch._dynamo as dynamo
+
+dynamo.config.cache_size_limit = 64
+
+
+@torch.compile
+def compiled_rmsnorm_function(x, scale, eps):
+    norm = x.norm(2, dim=-1, keepdim=True)
+    rms = norm / (x.size(-1) ** 0.5)
+    return scale[None, :, None, None] * x / (rms + eps)
+
 
 class RMSNorm(nn.Module):
     def __init__(self, d, eps=1e-8):
@@ -11,18 +22,34 @@ class RMSNorm(nn.Module):
         self.scale = nn.Parameter(torch.ones(d))
 
     def forward(self, x):
-        norm = x.norm(2, dim=-1, keepdim=True)
-        rms = norm / (x.size(-1) ** 0.5)
-        return self.scale[None, :, None, None] * x / (rms + self.eps)
+        return compiled_rmsnorm_function(x, self.scale, self.eps)
+        # fused using torch compile
+        # norm = x.norm(2, dim=-1, keepdim=True)
+        # rms = norm / (x.size(-1) ** 0.5)
+        # return self.scale[None, :, None, None] * x / (rms + self.eps)
+
+
+@torch.compile
+def pointwise_gating(x, act_fn):
+    lin, gate = rearrange(x, "n (g c) h w -> g n c h w", g=2)
+    return lin * act_fn(gate)
 
 
 class SimpleResNetBlock(nn.Module):
     def __init__(
-        self, in_channels, out_channels, kernel_size=3, stride=1, padding="same", act_fn=torch.sin
+        self,
+        in_channels,
+        out_channels,
+        kernel_size=3,
+        stride=1,
+        padding="same",
+        act_fn=torch.sin,
     ):
         super(SimpleResNetBlock, self).__init__()
         self.rms_norm = RMSNorm(out_channels)
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, groups=2)
+        self.conv = nn.Conv2d(
+            in_channels, out_channels, kernel_size, stride, padding, groups=2
+        )
         self.pointwise = nn.Conv2d(in_channels // 2, out_channels, 1, stride, padding)
         self.act_fn = act_fn
         torch.nn.init.zeros_(self.pointwise.weight)
@@ -32,12 +59,13 @@ class SimpleResNetBlock(nn.Module):
         skip = x
         x = self.rms_norm(x)
         x = self.conv(x)
-        lin, gate = rearrange(x, "n (g c) h w -> g n c h w", g=2)
-        x = lin * self.act_fn(gate)
-        #x = self.act_fn(x)
+        x = pointwise_gating(x, self.act_fn)
+        # fused using torch compile
+        # lin, gate = rearrange(x, "n (g c) h w -> g n c h w", g=2)
+        # x = lin * self.act_fn(gate)
         x = self.pointwise(x)
         return x + skip
-   
+
 
 class DownBlock(nn.Module):
     def __init__(self, in_channels, out_channels, scale_factor=2):
@@ -71,7 +99,11 @@ class UpBlock(nn.Module):
 
 class Encoder(nn.Module):
     def __init__(
-        self, in_channels, out_channels, down_layer_blocks=((32, 2), (64, 2), (128, 2)), act_fn=torch.sin
+        self,
+        in_channels,
+        out_channels,
+        down_layer_blocks=((32, 2), (64, 2), (128, 2)),
+        act_fn=torch.sin,
     ):
         super(Encoder, self).__init__()
         self.in_conv = nn.Conv2d(
@@ -130,7 +162,11 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
     def __init__(
-        self, in_channels, out_channels, up_layer_blocks=((128, 2), (64, 2), (32, 2)), act_fn=torch.sin
+        self,
+        in_channels,
+        out_channels,
+        up_layer_blocks=((128, 2), (64, 2), (32, 2)),
+        act_fn=torch.sin,
     ):
         super(Decoder, self).__init__()
         self.in_conv = nn.Conv2d(
@@ -195,19 +231,29 @@ class AutoEncoder(nn.Module):
         super(AutoEncoder, self).__init__()
 
         activation_functions = {
-            'relu': F.relu,
-            'leaky_relu': F.leaky_relu,
-            'sigmoid': F.sigmoid,
-            'tanh': F.tanh,
-            'elu': F.elu,
-            'selu': F.selu,
-            'gelu': F.gelu,
-            'silu': F.silu,
-            'sin': torch.sin,
+            "relu": F.relu,
+            "leaky_relu": F.leaky_relu,
+            "sigmoid": F.sigmoid,
+            "tanh": F.tanh,
+            "elu": F.elu,
+            "selu": F.selu,
+            "gelu": F.gelu,
+            "silu": F.silu,
+            "sin": torch.sin,
         }
 
-        self.encoder = Encoder(pixel_channels, bottleneck_channels, down_layer_blocks, activation_functions[act_fn])
-        self.decoder = Decoder(bottleneck_channels, pixel_channels, up_layer_blocks, activation_functions[act_fn])
+        self.encoder = Encoder(
+            pixel_channels,
+            bottleneck_channels,
+            down_layer_blocks,
+            activation_functions[act_fn],
+        )
+        self.decoder = Decoder(
+            bottleneck_channels,
+            pixel_channels,
+            up_layer_blocks,
+            activation_functions[act_fn],
+        )
 
     def encode(self, x, checkpoint=True):
         return self.encoder(x, checkpoint)
